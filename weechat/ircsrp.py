@@ -405,7 +405,8 @@ def ircsrp_in_msg_cb(data, modifier, modifier_data, strng):
                                 # Send response
                                 if cmd == 'PRIVMSG':
                                     # Send as private message if received as private message.
-                                    w.command(buffer, '/msg %s %s' % (sender_nick, response))
+                                    w.command(buffer, '/quote PRIVMSG %s :%s' %
+                                            (sender_nick, response))
                                 else:
                                     w.command(buffer, '/quote NOTICE %s :%s' % (sender_nick, response))
                                 # Break out of for loop, no sense in checking other contexts.
@@ -432,7 +433,8 @@ def ircsrp_in_msg_cb(data, modifier, modifier_data, strng):
                             if response is not True:
                                 if cmd == 'PRIVMSG':
                                     # Send as private message if received as private message.
-                                    w.command(buffer, '/msg %s %s' % (sender_nick, response))
+                                    w.command(buffer, '/quote PRIVMSG %s :%s' %
+                                            (sender_nick, response))
                                 else:
                                     w.command(buffer, '/quote NOTICE %s :%s' % (sender_nick, response))
                             # Break out of for loop, no sense in checking other contexts.
