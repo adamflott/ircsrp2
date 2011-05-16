@@ -29,6 +29,12 @@ ircsrp_general_hooks = []           # Other hooks that are needed as long as irc
 ircsrp_buffers_contexts = {}        # Dict of buffer:(IRCSRPCtxs, [hooks,...], dave_nick)
 weechat_dir = None                  # Will hold weechat's config dir
 
+# Default settings
+settings = {
+        # Interval (in sec) between rekeys (6 hours)
+        'channel_default.dave.rekey_interval':str(6*60*60*1000)
+}
+
 def ircsrp_cmd_cb(data, buffer, args):
     """
     Callback for weechat ircsrp command hook.
@@ -161,8 +167,10 @@ def ircsrp_dave_enable(buffer, roster):
     # Hook general hooks (if necessary)
     if len(ircsrp_general_hooks) == 0:
         ircsrp_hook_general()
-    # Hook timer hook (for rekey).  Defaults to every 3 hours.
-    timer_hook = w.hook_timer(1000*60*60*3, 34, 0, 'ircsrp_newkey_cb', buffer)
+    # Read rekey interval from config
+    rekey_interval = int(ircsrp_config_get_channel(buffer, 'dave.rekey_interval'))
+    # Hook timer hook (for rekey)
+    timer_hook = w.hook_timer(rekey_interval, 0, 1, 'ircsrp_newkey_cb', buffer)
     # add to global ircsrp_buffers_contexts dict
     ircsrp_buffers_contexts[buffer] = (ctx, [timer_hook], None)
     return w.WEECHAT_RC_OK
@@ -341,6 +349,20 @@ def ircsrp_unhook_general():
         w.unhook(h)
     ircsrp_general_hooks = []
 
+def ircsrp_config_get_channel(buffer, option):
+    """
+    Returns a config setting for a buffer, falling back on the non-channel specific defaults.
+    """
+    # Get buffer name
+    buffer_name = w.buffer_get_string(buffer, 'name')
+    # Try to get channel specific config
+    value = w.config_get_plugin('channel_%s.%s' % (buffer_name, option))
+    if value == "":
+        # Try default
+        value = w.config_get_plugin('channel_default.%s' % option)
+    # No need to check
+    return value
+
 def ircsrp_in_msg_cb(data, modifier, modifier_data, strng):
     # XXX: what about nick collisions due to different irc networks?
     match = re.match(r'^:(.*?) (PRIVMSG|NOTICE|TOPIC|332) (.*?) :(.*)$', strng)
@@ -492,12 +514,23 @@ def ircsrp_buffer_closing_cb(data, signal, signal_data):
 
     return w.WEECHAT_RC_OK
 
-def ircsrp_newkey_cb(data, remaining_calls):
+def ircsrp_newkey_cb(buffer, remaining_calls):
     """
     Callback to rekey
     """
     # XXX: Add some check so we don't rekey unless there's been some activity?
-    return ircsrp_dave_newkey(data)
+    # Read rekey interval from config
+    rekey_interval = int(ircsrp_config_get_channel(buffer, 'dave.rekey_interval'))
+    # Remove old timer (XXX: this code assumes there's only one buffer specific timer - it will
+    # need to be updated if we ever add another one.  I thought we might need more, do we?)
+    hooks = ircsrp_buffers_contexts[buffer][1]
+    for i in reversed(range(len(hooks))):
+        w.unhook(hooks[i])
+        del hooks[i]
+    # Hook timer hook (for next rekey)
+    timer_hook = w.hook_timer(rekey_interval, 0, 1, 'ircsrp_newkey_cb', buffer)
+    hooks.append(timer_hook)
+    return ircsrp_dave_newkey(buffer)
 
 # Weechat registration - I'd put this all in a function, but weechat doesn't like that.
 if __name__ == '__main__':
@@ -526,6 +559,11 @@ if __name__ == '__main__':
 
     # Get weechat dir
     weechat_dir = w.info_get("weechat_dir","")
+
+    # Init config params
+    for option, default_value in settings.items():
+        if w.config_get_plugin(option) == "":
+            w.config_set_plugin(option, default_value)
 
 
 ## Begin: ircsrp2.py
