@@ -26,7 +26,7 @@ import os.path
 # Script globals
 ircsrp_cmd_hook = None              # Hook for /ircsrp command
 ircsrp_general_hooks = []           # Other hooks that are needed as long as ircsrp is active
-ircsrp_buffers_contexts = {}        # Dict of buffer:(IRCSRPCtxs, [hooks,...], dave_nick)
+ircsrp_buffers_contexts = {}        # Dict of buffer:WeeSRPCTX()
 weechat_dir = None                  # Will hold weechat's config dir
 
 # Default settings
@@ -34,6 +34,20 @@ settings = {
         # Interval (in sec) between rekeys (6 hours)
         'channel_default.dave.rekey_interval':str(6*60*60*1000)
 }
+
+class WeeSRPCTX(object):
+
+    def __init__(self, ctx=None, hooks=None, dave_nick=None):
+        self.ctx = ctx 
+        if hooks is None:
+            self.hooks = []
+        else:
+            self.hooks = hooks
+        self.dave_nick = dave_nick
+
+    def __repr__(self):
+        return '<WeeSRPCTX: ctx=%s, hooks=%s, dave_nick=%s>' % (str(self.ctx),
+                str(self.hooks), str(self.dave_nick))
 
 def ircsrp_cmd_cb(data, buffer, args):
     """
@@ -172,7 +186,8 @@ def ircsrp_dave_enable(buffer, roster):
     # Hook timer hook (for rekey)
     timer_hook = w.hook_timer(rekey_interval, 0, 1, 'ircsrp_newkey_cb', buffer)
     # add to global ircsrp_buffers_contexts dict
-    ircsrp_buffers_contexts[buffer] = (ctx, [timer_hook], None)
+    ircsrp_buffers_contexts[buffer] = WeeSRPCTX(ctx=ctx, hooks=[timer_hook],
+                                                                dave_nick=None)
     return w.WEECHAT_RC_OK
 
 def ircsrp_dave_disable(buffer):
@@ -190,7 +205,7 @@ def ircsrp_dave_disable(buffer):
         return w.WEECHAT_RC_ERROR
 
     # Unhook channel specific hook(s)
-    hooks = ircsrp_buffers_contexts[buffer][1]
+    hooks = ircsrp_buffers_contexts[buffer].hooks
     for h in hooks:
         w.unhook(h)
     # remove buffer from global ircsrp_buffers_contexts dict
@@ -216,7 +231,7 @@ def ircsrp_dave_newkey(buffer):
         w.prnt('', w.prefix('error') + 'IRCSRP not enabled in dave-mode on the specified buffer.')
         return w.WEECHAT_RC_ERROR
 
-    ctx = ircsrp_buffers_contexts[buffer][0]
+    ctx = ircsrp_buffers_contexts[buffer].ctx
     newkey_msg = ircsrp_new_ctx_key(ctx)
     # Get channel name
     channel = w.buffer_get_string(buffer, 'name').split('.')[1] # XXX: hmmm... what if buffer's name gets changed?
@@ -247,7 +262,8 @@ def ircsrp_enable(buffer, username, password, dave_nick):
     # Clean up dave_nick
     dave_nick = dave_nick.strip().lower()
     # Add context to global dict (no channel specific hooks needed, hence the [])
-    ircsrp_buffers_contexts[buffer] = (ctx, [], dave_nick)
+    ircsrp_buffers_contexts[buffer] = WeeSRPCTX(ctx=ctx, hooks=None,
+                                                            dave_nick=dave_nick)
     # Hook general hooks (if necessary)
     if len(ircsrp_general_hooks) == 0:
         ircsrp_hook_general()
@@ -270,7 +286,7 @@ def ircsrp_disable(buffer):
         return w.WEECHAT_RC_ERROR
 
     # Unhook channel specific hooks (if any)
-    for h in ircsrp_buffers_contexts[buffer][1]:
+    for h in ircsrp_buffers_contexts[buffer].hooks:
         w.unhook(h)
     
     # Remove context from global dict
@@ -317,7 +333,7 @@ def ircsrp_on_buffer(buffer, dave=False):
     if buffer not in ircsrp_buffers_contexts:
         # Not enabled at all
         return False
-    elif dave and not hasattr(ircsrp_buffers_contexts[buffer][0], 'users'):
+    elif dave and not hasattr(ircsrp_buffers_contexts[buffer].ctx, 'users'):
         # Dave's not here, man
         return False
     else:
@@ -387,7 +403,7 @@ def ircsrp_in_msg_cb(data, modifier, modifier_data, strng):
                 return strng
             if buffer in ircsrp_buffers_contexts:
                 # Ircsrp is enabled on this channel;  grab context.
-                ctx = ircsrp_buffers_contexts[buffer][0]
+                ctx = ircsrp_buffers_contexts[buffer].ctx
             try:
                 msg = ircsrp_unpack(ctx, msg)
                 if msg is None:
@@ -410,7 +426,7 @@ def ircsrp_in_msg_cb(data, modifier, modifier_data, strng):
                 # context until we find one in which we're dave.  Then we'll check to make sure
                 # that the sender is on the channel nicklist before we respond.
                 for buffer in ircsrp_buffers_contexts:
-                    ctx = ircsrp_buffers_contexts[buffer][0]
+                    ctx = ircsrp_buffers_contexts[buffer].ctx
                     if ctx.isdave: # We're dave.
                         # Verify that sender nick is on the channel
                         if w.nicklist_search_nick(buffer, '', sender_nick) != '':
@@ -438,8 +454,8 @@ def ircsrp_in_msg_cb(data, modifier, modifier_data, strng):
                 # ircsrp enabled context until we find one that has our sender as dave and has
                 # started a key exchange already.
                 for buffer in ircsrp_buffers_contexts:
-                    ctx = ircsrp_buffers_contexts[buffer][0]
-                    dave_nick = ircsrp_buffers_contexts[buffer][2]
+                    ctx = ircsrp_buffers_contexts[buffer].ctx
+                    dave_nick = ircsrp_buffers_contexts[buffer].dave_nick
                     if ctx.ex.status != 0 and sender_nick.strip().lower() == dave_nick:
                         # Found the right context
                         try:
@@ -489,7 +505,7 @@ def ircsrp_out_msg_cb(data, modifier, modifier_data, strng):
         if buffer in ircsrp_buffers_contexts and nosrp is None:
             # This is from an ircsrp enabled buffer and it's not a nosrp message.
             # Ircsrp is enabled on this channel; grab context.
-            ctx = ircsrp_buffers_contexts[buffer][0]
+            ctx = ircsrp_buffers_contexts[buffer].ctx
             # Attempt to encrypt message
             try:
                 msg = ircsrp_pack(ctx, msg)
@@ -523,7 +539,7 @@ def ircsrp_newkey_cb(buffer, remaining_calls):
     rekey_interval = int(ircsrp_config_get_channel(buffer, 'dave.rekey_interval'))
     # Remove old timer (XXX: this code assumes there's only one buffer specific timer - it will
     # need to be updated if we ever add another one.  I thought we might need more, do we?)
-    hooks = ircsrp_buffers_contexts[buffer][1]
+    hooks = ircsrp_buffers_contexts[buffer].hooks
     for i in reversed(range(len(hooks))):
         w.unhook(hooks[i])
         del hooks[i]
