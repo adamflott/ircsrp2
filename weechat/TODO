@@ -1,0 +1,7 @@
+Known Issues:
+* Key change messages are accepted from anybody. [security]
+* IRC server could spoof appearance of encrypted message.
+* Hard wired to IRC only.
+* Roster pickle load fails if script is in autoload directory.
+* Truncated topics and messages fail to decrypt.
+* Nick collisions on multiple irc networks might cause issues.
