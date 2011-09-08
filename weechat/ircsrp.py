@@ -1,3 +1,4 @@
+#!/usr/bin/env python
 ## ircsrp.py - A weechat IRCSRP script
 ##
 ## Copyright (c) 2011, TC Hough
@@ -22,6 +23,14 @@
 import pickle
 import re
 import os.path
+import sys
+from optparse import OptionParser
+
+# We use the fcntl module to lock the roster on platforms that support it.
+try:
+    import fcntl
+except ImportError:
+    pass
 
 # Script globals
 ircsrp_cmd_hook = None              # Hook for /ircsrp command
@@ -31,19 +40,22 @@ weechat_dir = None                  # Will hold weechat's config dir
 
 # Default settings
 settings = {
-        # Interval (in sec) between rekeys (6 hours)
-        'channel_default.dave.rekey_interval':str(6*60*60*1000)
+        # Interval (in ms) between rekeys (6 hours)
+        'channel_default.dave.rekey_interval':str(6*60*60*1000),
+        # Interval (in ms) between roster re-reads (0 = never)
+        'channel_default.dave.reread_roster_interval':'0'
 }
 
 class WeeSRPCTX(object):
 
-    def __init__(self, ctx=None, hooks=None, dave_nick=None):
+    def __init__(self, ctx=None, hooks=None, dave_nick=None, roster_file_name=None):
         self.ctx = ctx 
         if hooks is None:
-            self.hooks = []
+            self.hooks = {}
         else:
             self.hooks = hooks
         self.dave_nick = dave_nick
+        self.roster_file_name = roster_file_name
 
     def __repr__(self):
         return '<WeeSRPCTX: ctx=%s, hooks=%s, dave_nick=%s>' % (str(self.ctx),
@@ -105,6 +117,21 @@ def ircsrp_cmd_cb(data, buffer, args):
             buffer = w.current_buffer()
         # attempt to rekey buffer
         return ircsrp_dave_newkey(buffer)
+    elif len(args) > 0 and args[0] == 'dave-reread-roster':
+        # dave-reread-roster command
+        if len(args) > 1:
+            # channel arg is provided
+            channel = args[1]
+            buffer = w.buffer_search('irc', channel)
+            if buffer == '':
+                # couldn't find channel
+                w.prnt('', w.prefix('error') + 'Unable to locate channel; have you joined?')
+                return w.WEECHAT_RC_ERROR
+        else:
+            # channel arg implied from current buffer
+            buffer = w.current_buffer()
+        # attempt to reread roster of buffer
+        return ircsrp_dave_reread_roster(buffer)
     elif len(args) > 0 and args[0] == 'enable':
         # enable command - 3 args req'd 1 arg optional
         if len(args) > 3:
@@ -181,13 +208,25 @@ def ircsrp_dave_enable(buffer, roster):
     # Hook general hooks (if necessary)
     if len(ircsrp_general_hooks) == 0:
         ircsrp_hook_general()
+
+    # Deal with instance independent timer hooks
+    hooks = {}
     # Read rekey interval from config
     rekey_interval = int(ircsrp_config_get_channel(buffer, 'dave.rekey_interval'))
     # Hook timer hook (for rekey)
-    timer_hook = w.hook_timer(rekey_interval, 0, 1, 'ircsrp_newkey_cb', buffer)
+    rekey_hook = w.hook_timer(rekey_interval, 0, 1, 'ircsrp_newkey_cb', buffer)
+    hooks['rekey'] = rekey_hook
+
+    # Read roster reread interval from config
+    reread_interval = int(ircsrp_config_get_channel(buffer, 'dave.reread_roster_interval'))
+    if reread_interval != 0: # Make sure it's not disabled
+        # Hook timer hook (for rekey)
+        reread_hook = w.hook_timer(reread_interval, 0, 1, 'ircsrp_reread_roster_cb', buffer)
+        hooks['reread'] = reread_hook
+
     # add to global ircsrp_buffers_contexts dict
-    ircsrp_buffers_contexts[buffer] = WeeSRPCTX(ctx=ctx, hooks=[timer_hook],
-                                                                dave_nick=None)
+    ircsrp_buffers_contexts[buffer] = WeeSRPCTX(ctx=ctx, hooks=hooks, dave_nick=None,
+            roster_file_name=roster)
     return w.WEECHAT_RC_OK
 
 def ircsrp_dave_disable(buffer):
@@ -207,7 +246,7 @@ def ircsrp_dave_disable(buffer):
     # Unhook channel specific hook(s)
     hooks = ircsrp_buffers_contexts[buffer].hooks
     for h in hooks:
-        w.unhook(h)
+        w.unhook(hooks[h])
     # remove buffer from global ircsrp_buffers_contexts dict
     del ircsrp_buffers_contexts[buffer]
     
@@ -231,6 +270,20 @@ def ircsrp_dave_newkey(buffer):
         w.prnt('', w.prefix('error') + 'IRCSRP not enabled in dave-mode on the specified buffer.')
         return w.WEECHAT_RC_ERROR
 
+    # Setup timer hook for rekeying if needed:
+    # Remove old timer
+    hooks = ircsrp_buffers_contexts[buffer].hooks
+    if 'rekey' in hooks:
+        w.unhook(hooks['rekey'])
+        del hooks['rekey']
+
+    # Read rekey interval from config
+    rekey_interval = int(ircsrp_config_get_channel(buffer, 'dave.rekey_interval'))
+    if rekey_interval != 0:
+        # Hook timer hook (for next rekey)
+        timer_hook = w.hook_timer(rekey_interval, 0, 1, 'ircsrp_newkey_cb', buffer)
+        hooks['rekey'] = timer_hook
+
     ctx = ircsrp_buffers_contexts[buffer].ctx
     newkey_msg = ircsrp_new_ctx_key(ctx)
     # Get channel name
@@ -241,6 +294,47 @@ def ircsrp_dave_newkey(buffer):
     current_topic = w.buffer_get_string(buffer, 'title')
     # Change topic XXX: Check if topic is encrypted before changing?
     w.command(buffer, '/topic %s' % current_topic)
+    return w.WEECHAT_RC_OK
+
+def ircsrp_dave_reread_roster(buffer):
+    """
+    Rereads the roster file on the specified buffer.
+
+    Returns WEECHAT_RC_OK or WEECHAT_RC_ERROR.
+    """
+    global ircsrp_buffers_contexts
+    # Sanity checks:
+    #   * buffer is enabled as dave
+    if not ircsrp_on_buffer(buffer, dave=True):
+        # Not enabled as dave
+        w.prnt('', w.prefix('error') + 'IRCSRP not enabled in dave-mode on the specified buffer.')
+        return w.WEECHAT_RC_ERROR
+
+    # Setup timer hook for rereading if needed:
+    # Remove old timer
+    hooks = ircsrp_buffers_contexts[buffer].hooks
+    if 'reread' in hooks:
+        w.unhook(hooks['reread'])
+        del hooks['reread']
+
+    # Read reread interval from config
+    reread_interval = int(ircsrp_config_get_channel(buffer, 'dave.reread_roster_interval'))
+    if reread_interval != 0:
+        # Hook timer hook (for next reread)
+        timer_hook = w.hook_timer(reread_interval, 0, 1, 'ircsrp_reread_roster_cb', buffer)
+        hooks['reread'] = timer_hook
+
+    ctx = ircsrp_buffers_contexts[buffer]
+    # Reread roster file
+    users = ircsrp_get_users_from_roster(ctx.roster_file_name)
+    # Replace users db leaving already underway negotiations intact.
+    # XXX: Security implications... if:
+    # (1) auth is underway
+    # (2) user credentials removed
+    # (3) user is authed even though credentials are removed
+    # Possible attack: start a stalled auth process in anticipation of revoked credentials.
+    # This is not something I'm worrying about right now.
+    ctx.ctx.users.db = users.db
     return w.WEECHAT_RC_OK
 
 def ircsrp_enable(buffer, username, password, dave_nick):
@@ -286,8 +380,9 @@ def ircsrp_disable(buffer):
         return w.WEECHAT_RC_ERROR
 
     # Unhook channel specific hooks (if any)
-    for h in ircsrp_buffers_contexts[buffer].hooks:
-        w.unhook(h)
+    hooks = ircsrp_buffers_contexts[buffer].hooks
+    for h in hooks:
+        w.unhook(hooks[h])
     
     # Remove context from global dict
     del ircsrp_buffers_contexts[buffer]
@@ -309,9 +404,18 @@ def ircsrp_get_users_from_roster(roster):
     if not os.path.isfile(roster_file_path):
         # XXX: choose another exception type?
         raise ValueError('%s does not exist.' % roster_file_path)
-    # Attempt to unpickle
     roster_file_obj = open(roster_file_path, 'r')
-    roster_obj = pickle.load(roster_file_obj) # XXX: try/except clause this bitch?
+    try:
+        # Check if file locking is supported
+        if 'fcntl' in sys.modules:
+            # Obtain lock
+            fcntl.flock(roster_file_obj, fcntl.LOCK_SH)
+        # Attempt to unpickle
+        roster_obj = pickle.load(roster_file_obj)
+    finally:
+        if 'fcntl' in sys.modules:
+            # Release lock
+            fcntl.flock(roster_file_obj, fcntl.LOCK_UN)
     return roster_obj
 
 def ircsrp_new_ctx_key(ctx):
@@ -535,26 +639,250 @@ def ircsrp_newkey_cb(buffer, remaining_calls):
     Callback to rekey
     """
     # XXX: Add some check so we don't rekey unless there's been some activity?
-    # Read rekey interval from config
-    rekey_interval = int(ircsrp_config_get_channel(buffer, 'dave.rekey_interval'))
-    # Remove old timer (XXX: this code assumes there's only one buffer specific timer - it will
-    # need to be updated if we ever add another one.  I thought we might need more, do we?)
-    hooks = ircsrp_buffers_contexts[buffer].hooks
-    for i in reversed(range(len(hooks))):
-        w.unhook(hooks[i])
-        del hooks[i]
-    # Hook timer hook (for next rekey)
-    timer_hook = w.hook_timer(rekey_interval, 0, 1, 'ircsrp_newkey_cb', buffer)
-    hooks.append(timer_hook)
     return ircsrp_dave_newkey(buffer)
+
+def ircsrp_reread_roster_cb(buffer, remaining_calls):
+    """
+    Callback to reread roster file for a particular buffer
+    """
+    # Reread the roster (new timer gets added if needed)
+    return ircsrp_dave_reread_roster(buffer)
+
+#######
+# Objects and functions not used when in Weechat script mode.
+def run_www_server(options):
+    """
+    options -- options parsed from command line arguments
+    """
+    # These imports and class defs are pretty heavy, so we only load them here,
+    # when absolutely needed.
+
+    # WWW imports
+    import select
+    import time
+    from threading import Thread, Event
+    from BaseHTTPServer import HTTPServer, BaseHTTPRequestHandler
+    from SocketServer import ThreadingMixIn
+    import socket
+    import cgi
+
+    # WWW classes
+    class WeeSRPWWW(ThreadingMixIn, HTTPServer):
+        timeout = 1     # SocketServer.handle_request() blocks for 1 seconds, max
+
+        def __init__(self, roster_file_name, *args, **kwargs):
+            HTTPServer.__init__(self, *args, **kwargs)
+            self.roster_file_name = roster_file_name
+            self.kill_me = Event()
+
+        def serve_until_killed(self):
+            while not self.kill_me.isSet():
+                self.handle_request()
+
+        def kill(self):
+            self.kill_me.set() 
+
+    class WeeSRPWWWReqHandler(BaseHTTPRequestHandler):
+        _register_closed_template = """
+        <html>
+        <head><title>Registration closed</title></head>
+        <body>
+        <p>Registration is currently closed.</p>
+        </body>
+        </html>
+        """
+
+        _register_open_template = """
+        <html>
+        <head><title>Account registration</title></head>
+        <body>
+        <p>Register an account:</p>
+        <form action="/register" method="post">
+        <label name="username">Username</label>
+        <input type="text" name="username" />
+        <br />
+        <label name="password">Password</label>
+        <input type="password" name="password" />
+        <br />
+        <label name="password_confirmation">Password</label>
+        <input type="password" name="password_confirmation" />
+        <br />
+        <input type="submit" />
+        </form>
+        </body>
+        </html>
+        """
+
+        _register_error_template = """
+        <html>
+        <head><title>Account registration</title></head>
+        <body>
+        <p style="color: red">Account registration failed: %s</p>
+        </body>
+        </html>
+        """
+
+        _register_success_template = """
+        <html>
+        <head><title>Account registration</title></head>
+        <body>
+        <p style="color: green">Account registration succeeded.</p>
+        </body>
+        </html>
+        """
+
+        closed = False
+
+        def do_GET(self):
+            # Check path and respond appropriately
+            if self.path == '/':
+                self._send_page(self._register_open_template)
+            else:
+                self._redirect_to_root()
+
+        def do_POST(self):
+            if self.closed:
+                self._redirect_to_root()
+            elif self.path == '/register':
+                params = self._parse_post_params()
+                try:
+                    self._attempt_registration(params)
+                except ValueError, e:
+                    self._send_page(self._register_error_template % str(e))
+                else:
+                    self._send_page(self._register_success_template)
+            else:
+                self.send_response(404)
+                self.end_headers()
+
+        def _attempt_registration(self, params):
+            """
+            Raises exception if unsuccessful.
+            """
+            # Sanity check params
+            if False in map(params.__contains__,
+                    ['username', 'password', 'password_confirmation']):
+                # The above condition is true if any of the parameters are missing.
+                raise ValueError('registration parameters missing.')
+            elif params['password'][0] != params['password_confirmation'][0]:
+                # passwords didn't match
+                raise ValueError('passwords must match.')
+            # At this point, we're all good as long as the username isn't taken.
+
+            # This is a strange try/except clause.  The story is this: old
+            # versions of python didn't support try/except/finally clauses,
+            # only try/finally clauses.  try/excepts had to be nested inside of
+            # try/finally to get the intended effect.  I'm aiming for that.
+            # Woo woo!
+            try:
+                try:
+                    # Load up the roster
+                    roster_file = open(self.server.roster_file_name, 'rw')
+                    # Check if file locking is supported
+                    if 'fcntl' in sys.modules:
+                        # Obtain lock
+                        fcntl.flock(roster_file, fcntl.LOCK_EX)
+                    # Attempt to unpickle
+                    roster_obj = pickle.load(roster_file)
+                except Exception, e:
+                    # Couldn't unpickle (or something)
+                    raise ValueError("couldn't open roster: " + str(e))
+                # Roster is open, lock is held
+                if params['username'][0] in roster_obj.db:
+                    raise ValueError('username already exists')
+                try:
+                    # Create the account!
+                    s, v = ircsrp_generate(params['username'][0], params['password'][0])
+                except Exception, e:
+                    # Couldn't generate credentials
+                    raise ValueError("couldn't generate credentials: " + str(e))
+                try:
+                    roster_obj.db[params['username'][0]] = (s, v)
+                    roster_file.seek(0)
+                    roster_file.write(pickle.dumps(roster_obj))
+                    # Success!
+                except Exception, e:
+                    raise ValueError("couldn't record roster: " + str(e))
+            finally:
+                if 'fcntl' in sys.modules:
+                    # Release lock
+                    fcntl.flock(roster_file, fcntl.LOCK_UN)
+        
+        def _redirect_to_root(self):
+            self.send_response(301)
+            self.send_header("Location", "/")
+            self.end_headers()
+        
+        def _send_page(self, page):
+            # Response/headers
+            self.send_response(200)
+            self.send_header("Content-type", "text/html")
+            self.end_headers()
+            # Send page
+            self.wfile.write(page)
+
+        def _parse_post_params(self):
+            # parse parms
+            ctype, pdict = cgi.parse_header(self.headers.getheader('content-type'))
+            if ctype == 'multipart/form-data':
+                post_params = cgi.parse_multipart(self.rfile, pdict)
+            elif ctype == 'application/x-www-form-urlencoded':
+                length = int(self.headers.getheader('content-length'))
+                post_params = cgi.parse_qs(self.rfile.read(length), keep_blank_values=1)
+            else:
+                post_params = {}
+
+            return post_params
+
+
+    # Ok, imports and definitions are out of the way, start the web server!
+    httpd = WeeSRPWWW(options.www_roster, (options.interface, options.port),WeeSRPWWWReqHandler)
+    httpd_thread = Thread(target=httpd.serve_until_killed)
+    httpd_thread.start()
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        print "Killing web server..."
+        httpd.kill()
+        sys.exit(0)
+
+def main(argv=sys.argv):
+    # This is the main function if not running as a Weechat script.
+    parser = OptionParser()
+    # Options we'll need: roster, port, interface
+    parser.add_option('-w', '--www', action='store', dest='www_roster',
+            help='Enable registration web server on this roster')
+    parser.add_option('-p', '--port', action='store', dest='port', type='int',
+            default=8888, help='Port to run web server on (default: 8888)')
+    parser.add_option('-i', '--interface', action='store', dest='interface',
+            default='127.0.0.1', help='Interface to run web server on (default: 127.0.0.1) (0.0.0.0 for all)')
+    options, argv = parser.parse_args(argv)
+    
+    # Verify options
+    if not options.www_roster:
+        parser.error('nothing to do.')
+    elif not os.path.isfile(options.www_roster):
+        parser.error('cannot find specified roster')
+    elif options.port > 65535 or options.port < 0:
+        parser.error('invalid port')
+
+    # Options are verified.
+    print "Starting web server..."
+    run_www_server(options)
+
+    sys.exit(0)
+
 
 # Weechat registration - I'd put this all in a function, but weechat doesn't like that.
 if __name__ == '__main__':
     try:
         import weechat as w
     except ImportError:
-        print 'This script must be run under Weechat.'
-        raise
+        # We're not under Weechat, act like an executable program.
+        main()
+        # We're expecting main() to call sys.exit(), but if not...
+        sys.exit(1)
 
     # Register this script
     w.register('ircsrp', 'TC Hough', '0.01', 'ISCL', 'ircsrp', '', '')
@@ -564,11 +892,13 @@ if __name__ == '__main__':
         '[dave-enable roster [channel]] | '
         '[dave-disable [channel]] | '
         '[dave-newkey [channel]] | '
+        '[dave-reread-roster [channel]] | '
         '[enable username password dave_nick [channel]] | '
         '[disable [channel]]', '',
         'dave-enable roster [%(irc_server_channels)] ||'
         'dave-disable [%(irc_server_channels)] ||'
         'dave-newkey [%(irc_server_channels)] ||'
+        'dave-reread-roster [%(irc_server_channels)] ||'
         'enable username password %(irc_server_nicks) [%(irc_server_channels)] ||'
         'disable [%(irc_server_channels)]',
         'ircsrp_cmd_cb', '')
