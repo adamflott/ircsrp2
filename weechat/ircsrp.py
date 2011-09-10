@@ -468,11 +468,21 @@ settings = {
         'channel_default.dave.rekey_interval':str(6*60*60*1000),
         # Interval (in ms) between roster re-reads (0 = never)
         'channel_default.dave.reread_roster_interval':'0'
+        # Waiting room channel ('' for disabled)
+        #'channel_default.dave.waiting_room':''
 }
 
 class WeeSRPCTX(object):
 
-    def __init__(self, ctx=None, hooks=None, dave_nick=None, roster_file_name=None):
+    def __init__(self, ctx=None, hooks=None, dave_nick=None,
+            roster_file_name=None, waiting_room=None):
+        """
+        ctx -- IRCSRPCtx
+        hooks -- dict of hooks
+        dave_nick -- nick of dave (if not dave)
+        roster_file_name -- file name of roster (if dave)
+        waiting_room -- buffer for waiting room (if waiting room mode on)
+        """
         self.ctx = ctx 
         if hooks is None:
             self.hooks = {}
@@ -480,6 +490,9 @@ class WeeSRPCTX(object):
             self.hooks = hooks
         self.dave_nick = dave_nick
         self.roster_file_name = roster_file_name
+        self.waiting_room = waiting_room
+        self.encrypted_room = None # for waiting room mode, defined on invite
+        self.encrypted_room_buffer_name = None # for waiting room mode, defined on join 
 
     def __repr__(self):
         return '<WeeSRPCTX: ctx=%s, hooks=%s, dave_nick=%s>' % (str(self.ctx),
@@ -492,6 +505,8 @@ def ircsrp_cmd_cb(data, buffer, args):
     args = args.split()
     if len(args) > 0 and args[0] == 'dave-enable':
         # dave-enable command
+        # this logic is obtuse, i should replace it with something cleaner.
+        wr_buffer = None
         if len(args) > 1:
             roster = args[1]
             if len(args) > 2:
@@ -502,11 +517,19 @@ def ircsrp_cmd_cb(data, buffer, args):
                     # couldn't find channel
                     w.prnt('', w.prefix('error') + 'Unable to locate channel; have you joined?')
                     return w.WEECHAT_RC_ERROR
+                if len(args) > 3:
+                    # waiting room arg is provided
+                    wr_channel = args[3]
+                    wr_buffer = w.buffer_search('irc', wr_channel)
+                    if wr_buffer == '':
+                        # couldn't find channel
+                        w.prnt('', w.prefix('error') + 'Unable to locate channel; have you joined?')
+                        return w.WEECHAT_RC_ERROR
             else:
                 # channel is implied from current buffer
                 buffer = w.current_buffer()
             # attempt to enable dave mode w/ roster on buffer
-            return ircsrp_dave_enable(buffer, roster)
+            return ircsrp_dave_enable(buffer, roster, wr_buffer=wr_buffer)
         else:
             # no roster listed; barf
             w.prnt('', w.prefix('error') + 'Which roster should be used?')
@@ -556,6 +579,28 @@ def ircsrp_cmd_cb(data, buffer, args):
             buffer = w.current_buffer()
         # attempt to reread roster of buffer
         return ircsrp_dave_reread_roster(buffer)
+    elif len(args) > 0 and args[0] == 'auth':
+        # auth command - 3 args req'd 1 arg optional
+        if len(args) > 3:
+            # username, password, dave_nick provided
+            username, password, dave_nick = args[1:4]
+            if len(args) > 4:
+                # channel arg is provided
+                channel = args[4]
+                buffer = w.buffer_search('irc', channel)
+                if buffer == '':
+                    # couldn't find channel
+                    w.prnt('', w.prefix('error') + 'Unable to locate channel; have you joined?')
+                    return w.WEECHAT_RC_ERROR
+            else:
+                # channel arg implied from current buffer
+                buffer = w.current_buffer()
+            # attempt to enable ircsrp on buffer w/ dave_nick
+            return ircsrp_enable(buffer, username, password, dave_nick, auth_only=True)
+        else:
+            # not enough args
+            w.prnt('', w.prefix('error') + 'Not enough arguments.')
+            return w.WEECHAT_RC_ERROR
     elif len(args) > 0 and args[0] == 'enable':
         # enable command - 3 args req'd 1 arg optional
         if len(args) > 3:
@@ -600,9 +645,13 @@ def ircsrp_cmd_cb(data, buffer, args):
 
     return weechat.WEECHAT_RC_OK
 
-def ircsrp_dave_enable(buffer, roster):
+def ircsrp_dave_enable(buffer, roster, wr_buffer=None):
     """
     Enable dave mode using roster on buffer.
+
+    buffer -- channel buffer to enable on
+    roster -- roster short name
+    wr_buffer -- optional channel buffer for waiting room
 
     Returns WEECHAT_RC_OK or WEECHAT_RC_ERROR.
     """
@@ -650,7 +699,7 @@ def ircsrp_dave_enable(buffer, roster):
 
     # add to global ircsrp_buffers_contexts dict
     ircsrp_buffers_contexts[buffer] = WeeSRPCTX(ctx=ctx, hooks=hooks, dave_nick=None,
-            roster_file_name=roster)
+            roster_file_name=roster, waiting_room=wr_buffer)
     return w.WEECHAT_RC_OK
 
 def ircsrp_dave_disable(buffer):
@@ -761,9 +810,16 @@ def ircsrp_dave_reread_roster(buffer):
     ctx.ctx.users.db = users.db
     return w.WEECHAT_RC_OK
 
-def ircsrp_enable(buffer, username, password, dave_nick):
+def ircsrp_enable(buffer, username, password, dave_nick, auth_only=False):
     """
     Enable ircsrp on buffer
+
+    username -- login username
+    password -- login password
+    dave_nick -- dave's nick, duuuhhh!
+    auth_only -- if True, initiate and on success, wait for an invite
+                from dave and enable on that channel (don't enable encryption
+                and decryption on specified buffer)
     """
     global ircsrp_buffers_contexts
     global ircsrp_general_hooks
@@ -779,9 +835,17 @@ def ircsrp_enable(buffer, username, password, dave_nick):
     ctx.password = password
     # Clean up dave_nick
     dave_nick = dave_nick.strip().lower()
+    
+    # If we're doing auth only, the specified buffer is the waiting room.
+    # Otherwise, there is no waiting room.
+    if auth_only:
+        waiting_room = buffer
+    else:
+        waiting_room = None
+
     # Add context to global dict (no channel specific hooks needed, hence the [])
     ircsrp_buffers_contexts[buffer] = WeeSRPCTX(ctx=ctx, hooks=None,
-                                                            dave_nick=dave_nick)
+                                    waiting_room=waiting_room, dave_nick=dave_nick)
     # Hook general hooks (if necessary)
     if len(ircsrp_general_hooks) == 0:
         ircsrp_hook_general()
@@ -878,11 +942,13 @@ def ircsrp_hook_general():
     ircsrp_general_hooks.append(w.hook_modifier('irc_in_notice', 'ircsrp_in_msg_cb', ''))
     ircsrp_general_hooks.append(w.hook_modifier('irc_in_332', 'ircsrp_in_msg_cb', ''))
     ircsrp_general_hooks.append(w.hook_modifier('irc_in_topic', 'ircsrp_in_msg_cb', ''))
+    ircsrp_general_hooks.append(w.hook_modifier('irc_in_invite', 'ircsrp_in_invite_cb', ''))
     ircsrp_general_hooks.append(w.hook_modifier('irc_out_privmsg', 'ircsrp_out_msg_cb', ''))
     ircsrp_general_hooks.append(w.hook_modifier('irc_out_topic', 'ircsrp_out_msg_cb', ''))
 
     # Signal hooks
     ircsrp_general_hooks.append(w.hook_signal('buffer_closing', 'ircsrp_buffer_closing_cb', ''))
+    ircsrp_general_hooks.append(w.hook_signal('irc_channel_opened', 'ircsrp_irc_channel_opened_cb', ''))
 
 def ircsrp_unhook_general():
     """
@@ -912,6 +978,7 @@ def ircsrp_in_msg_cb(data, modifier, modifier_data, strng):
     match = re.match(r'^:(.*?) (PRIVMSG|NOTICE|TOPIC|332) (.*?) :(.*)$', strng)
     if match:
         sender, cmd, recipients, msg = match.groups()
+        orig_msg = msg
         give_sender_badge = False
         global ircsrp_buffers_contexts
         # Decide if message is encrypted, key exchange, or plaintext.
@@ -929,21 +996,29 @@ def ircsrp_in_msg_cb(data, modifier, modifier_data, strng):
             if buffer == '':
                 # Couldn't find channel buffer, just return.
                 return strng
-            if buffer in ircsrp_buffers_contexts:
-                # Ircsrp is enabled on this channel;  grab context.
-                ctx = ircsrp_buffers_contexts[buffer].ctx
-            try:
-                msg = ircsrp_unpack(ctx, msg)
-                if msg is None:
-                    # A session key change just took place.  Print a notice, but don't print a
-                    # message.
-                    w.prnt('', w.prefix('network') + 'IRCSRP new session key')
-                    return ''
-            except MalformedError, ValueError:
-                # This is either plaintext or undecryptable with our string.
-                pass
-            else:
-                give_sender_badge = True
+            ctx = None
+            if buffer in ircsrp_buffers_contexts and \
+                    ircsrp_buffers_contexts[buffer].waiting_room != buffer:
+                # Ircsrp is enabled on this channel and it's not the waiting room.
+                ctx = ircsrp_buffers_contexts[buffer].ctx # Grab context
+            else: # Search contexts for encrypted room (in case we're in waiting room mode)
+                for b in ircsrp_buffers_contexts:
+                    if ircsrp_buffers_contexts[b].encrypted_room == buffer:
+                        ctx = ircsrp_buffers_contexts[b].ctx
+                        break
+            if ctx is not None:
+                try:
+                    msg = ircsrp_unpack(ctx, msg)
+                    if msg is None:
+                        # A session key change just took place.  Print a notice, but don't print a
+                        # message.
+                        w.prnt('', w.prefix('network') + 'IRCSRP new session key')
+                        return ''
+                except MalformedError, ValueError:
+                    # This is either plaintext or undecryptable with our string.
+                    pass
+                else:
+                    give_sender_badge = True
         elif msg.startswith('+srpa'):
             # Probably key exchange.  Are we expecting a keyexchange from this nick?
             # Dave is always expecting a keyexchange from any nick on one of his encrypted
@@ -954,11 +1029,16 @@ def ircsrp_in_msg_cb(data, modifier, modifier_data, strng):
                 # context until we find one in which we're dave.  Then we'll check to make sure
                 # that the sender is on the channel nicklist before we respond.
                 for buffer in ircsrp_buffers_contexts:
-                    ctx = ircsrp_buffers_contexts[buffer].ctx
+                    weesrpctx = ircsrp_buffers_contexts[buffer]
+                    ctx = weesrpctx.ctx
                     if ctx.isdave: # We're dave.
-                        # Verify that sender nick is on the channel
-                        if w.nicklist_search_nick(buffer, '', sender_nick) != '':
-                            # Sender resides on channel.  We can response to this message.
+                        # Verify that sender nick is on the channel (or waiting room)
+                        if w.nicklist_search_nick(buffer, '', sender_nick) != '' or \
+                            (weesrpctx.waiting_room is not None and
+                            (w.nicklist_search_nick(weesrpctx.waiting_room, '',
+                                sender_nick) != '')):
+                            # Sender resides on encrypted channel or waiting room.  We can
+                            # response to this message.
                             try:
                                 # Generate and send response to this keyexchange message.
                                 response = ircsrp_exchange(ctx, msg, sender_nick)
@@ -975,6 +1055,10 @@ def ircsrp_in_msg_cb(data, modifier, modifier_data, strng):
                                             (sender_nick, response))
                                 else:
                                     w.command(buffer, '/quote NOTICE %s :%s' % (sender_nick, response))
+                                # Send invite (if necessary)
+                                if orig_msg[5] == '2' and weesrpctx.waiting_room is not None:
+                                    # We've got a waiting room and auth success.
+                                    w.command(buffer, '/invite %s' % sender_nick)
                                 # Break out of for loop, no sense in checking other contexts.
                                 break
             elif msg[5] in ('1','3'):
@@ -1019,6 +1103,58 @@ def ircsrp_in_msg_cb(data, modifier, modifier_data, strng):
     else:
         return strng
 
+def ircsrp_in_invite_cb(data, modifier, modifier_data, strng):
+    # This callback will examine each invite.  If the invite is from dave on an
+    # ircsrp context with a waiting room, the channel's expected buffer name
+    # will be added as that context's encryption channel and joined.
+    #
+    # XXX: nick collisions on multiple irc networks might throw a wrench in this...
+    # XXX: this makes more sense as a signal, not a modifier... durrr...
+    #
+    match = re.match(r'^:(.*?) (INVITE) (.*?) :(.*)$', strng)
+    if match:
+        sender, cmd, recipients, msg = match.groups()
+        global ircsrp_buffers_contexts
+        sender_nick = sender.split('!')[0] # Get sender nick
+        # Determine if sender is one of our daves and if so, get context.
+        for buffer in ircsrp_buffers_contexts:
+            if ircsrp_buffers_contexts[buffer].dave_nick == sender_nick:
+                # We found our dave
+                server = w.buffer_get_string(buffer, 'name').split('.')[0]
+                ctx = ircsrp_buffers_contexts[buffer]
+                # Set the name of the encrypted room in the context.  Another
+                # callback will set ctx.encrypted_room with actual buffer ref
+                # when the join finishes. (assuming we're not already in it)
+                ctx.encrypted_room_buffer_name = '.'.join((server, msg))
+                # Test if we're already in the channel.  If not, join.  If so,
+                enc_chan_buffer = w.buffer_search('irc', '%s.%s' % (server, msg))
+                if enc_chan_buffer == '':
+                    # We're not on the channel
+                    w.command(buffer, '/join ' + msg) # join the channel
+                else:
+                    # We're already on the channel
+                    # set ctx.encrypted_room
+                    ctx.encrypted_room = enc_chan_buffer
+    return strng
+
+def ircsrp_irc_channel_opened_cb(data, signal, signal_data):
+    # This callback gets executed whenever the irc channel join signal
+    # occurs. It examines each SRP context to see if we're joining an
+    # encrypted room in response to an invite from Dave.  If so, encryption
+    # functionality is enabled by giving the WeeSRPCTX object a buffer
+    # pointer.
+    buffer = signal_data
+    buffer_name = w.buffer_get_string(buffer, 'name')
+    global ircsrp_buffers_contexts
+    for b in ircsrp_buffers_contexts:
+        if ircsrp_buffers_contexts[b].encrypted_room_buffer_name == buffer_name:
+            # We are joining the right room; set the buffer pointer to enable
+            # encryption properly.
+            ctx = ircsrp_buffers_contexts[b]
+            ctx.encrypted_room = buffer
+            break
+    return w.WEECHAT_RC_OK
+
 def ircsrp_out_msg_cb(data, modifier, modifier_data, strng):
     # :nosrp is a special tag that we might optionally insert into a raw PRIVMSG or TOPIC command.
     # I'm open to less hacky suggestions for how to do this.
@@ -1030,10 +1166,19 @@ def ircsrp_out_msg_cb(data, modifier, modifier_data, strng):
         if buffer == '':
             # Couldn't find channel buffer, just return.
             return strng
-        if buffer in ircsrp_buffers_contexts and nosrp is None:
-            # This is from an ircsrp enabled buffer and it's not a nosrp message.
+        ctx = None
+        if ((buffer in ircsrp_buffers_contexts) and (nosrp is None) and 
+                (ircsrp_buffers_contexts[buffer].waiting_room != buffer)):
+            # This is from an ircsrp enabled buffer and it's not a nosrp message
+            # or from a waiting room.
             # Ircsrp is enabled on this channel; grab context.
             ctx = ircsrp_buffers_contexts[buffer].ctx
+        else:
+            for b in ircsrp_buffers_contexts:
+                if ircsrp_buffers_contexts[b].encrypted_room == buffer:
+                    ctx = ircsrp_buffers_contexts[b].ctx
+                    break
+        if ctx is not None:
             # Attempt to encrypt message
             try:
                 msg = ircsrp_pack(ctx, msg)
@@ -1315,13 +1460,13 @@ if __name__ == '__main__':
 
     # Register command hook
     ircsrp_cmd_hook = w.hook_command('ircsrp', 'ircsrp management',
-        '[dave-enable roster [channel]] | '
+        '[dave-enable roster [[channel] [waiting_room_channel]]] | '
         '[dave-disable [channel]] | '
         '[dave-newkey [channel]] | '
         '[dave-reread-roster [channel]] | '
         '[enable username password dave_nick [channel]] | '
         '[disable [channel]]', '',
-        'dave-enable roster [%(irc_server_channels)] ||'
+        'dave-enable roster [%(irc_server_channels)] [%(irc_server_channels)] ||'
         'dave-disable [%(irc_server_channels)] ||'
         'dave-newkey [%(irc_server_channels)] ||'
         'dave-reread-roster [%(irc_server_channels)] ||'
