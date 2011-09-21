@@ -2,7 +2,9 @@
 
 > IRCSRP is based on the SRP-6 protocol for password-authenticated key agreement. While SRP was originally designed for establishing a secure, authenticated channel between a user and a host, it can be adapted for group communications
 
-Design and reference implementation by Björn [Edström](http://www.bjrn.se/ircsrp/)
+(from the [spec](http://www.bjrn.se/ircsrp/ircsrp.2.0.txt))
+
+Design and reference implementation by [Björn Edström](http://www.bjrn.se/ircsrp/)
 
 Most instant messaging encryption plugins only support peer to peer level encryption. IRCSRP allows
 an entire IRC channel to communicate securely. In fact this technique is not bound to the IRC
