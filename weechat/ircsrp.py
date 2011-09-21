@@ -1023,7 +1023,7 @@ def ircsrp_in_msg_cb(data, modifier, modifier_data, strng):
             # Probably key exchange.  Are we expecting a keyexchange from this nick?
             # Dave is always expecting a keyexchange from any nick on one of his encrypted
             # channels.  Others only expect key exchange messages from dave.
-            sender_nick = sender.split('!')[0] # Get sender nick
+            sender_nick = sender.split('!')[0].lower() # Get sender nick
             if msg[5] in ('0','2'):
                 # This key exchange notice implies we're dave.  We'll search each ircsrp enabled
                 # context until we find one in which we're dave.  Then we'll check to make sure
@@ -1115,7 +1115,7 @@ def ircsrp_in_invite_cb(data, modifier, modifier_data, strng):
     if match:
         sender, cmd, recipients, msg = match.groups()
         global ircsrp_buffers_contexts
-        sender_nick = sender.split('!')[0] # Get sender nick
+        sender_nick = sender.split('!')[0].lower() # Get sender nick
         # Determine if sender is one of our daves and if so, get context.
         for buffer in ircsrp_buffers_contexts:
             if ircsrp_buffers_contexts[buffer].dave_nick == sender_nick:
