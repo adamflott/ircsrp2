@@ -5,8 +5,6 @@
 
 #include "external/bstring/bstrlib.h"
 
-#define const_g 2;
-
 // datatypes
 enum auth_state { INIT };
 
@@ -23,6 +21,12 @@ typedef struct irc_srp_alice_t {
 }
 
 // functions
-irc_srp_init_alice(char *, char *);
 
+// alice
+irc_srp_init_alice(char *user, char *password);
+
+// utility
+mpz_t bytes2int(void *data, unsigned int length);
+
+// constants
 mpz_t const_N(void);

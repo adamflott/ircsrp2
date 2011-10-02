@@ -1,10 +1,10 @@
 #include "ircsrp.h"
 
-irc_srp_alice_t * irc_srp_init_alice(char *user, char *pass) {
+irc_srp_alice_t * irc_srp_init_alice(char *user, char *password) {
     irc_srp_alice_t *alice;
     
     bstring bstr_user = bfromcstr(user);
-    bstring bstr_pass = bfromcstr(pass);
+    bstring bstr_pass = bfromcstr(password);
     
     unsigned int random_data_read_amount = 32;
     
@@ -16,11 +16,18 @@ irc_srp_alice_t * irc_srp_init_alice(char *user, char *pass) {
     memset(alice, 0. sizeof irc_srp_alice_t);
     
     void *s;
+    mpz_t v;
     
+    // begin s
     int fh = open("/dev/random", O_RDONLY);
     read(fh, s, random_data_read_amount);
     close(fh);
     
+    alice->s = s;
+    
+    // end s
+    
+    // begin v
     unsigned int length = random_data_read_amount + blength(bstr_user) + blength(bstr_pass);
     
     bstring digest;
@@ -32,8 +39,16 @@ irc_srp_alice_t * irc_srp_init_alice(char *user, char *pass) {
     sha256(sip->data, length, digest);
     
     mpz_t x = bytes2int(digest, length);
+
+    mpz_t g;
+    mpz_init(g);
     
-    alice->s = s;
+    mpz_set_ui(g, 2);
+    
+    mpz_powm(v, g, x, const_N());
+    
+    alice->v = v;
+    // end v
     
     alice->state = INIT;
     
