@@ -29,12 +29,12 @@
  *  http://csrc.nist.gov/publications/fips/fips197/fips-197.pdf
  */
 
-#include "polarssl/config.h"
+#include "config.h"
 
 #if defined(POLARSSL_AES_C)
 
-#include "polarssl/aes.h"
-#include "polarssl/padlock.h"
+#include "aes.h"
+#include "padlock.h"
 
 /*
  * 32-bit integer manipulation macros (little endian)
