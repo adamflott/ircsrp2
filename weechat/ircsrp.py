@@ -459,6 +459,7 @@ def ircsrp_exchange(ctx, msg=None, sender=None):
 # Script globals
 ircsrp_cmd_hook = None              # Hook for /ircsrp command
 ircsrp_general_hooks = []           # Other hooks that are needed as long as ircsrp is active
+ircsrp_temp_hooks = {}              # Temporary hooks
 ircsrp_buffers_contexts = {}        # Dict of buffer:WeeSRPCTX()
 weechat_dir = None                  # Will hold weechat's config dir
 
@@ -1072,8 +1073,13 @@ def ircsrp_in_msg_cb(data, modifier, modifier_data, strng):
                                     w.command(buffer, '/quote NOTICE %s :%s' % (sender_nick, response))
                                 # Send invite (if necessary)
                                 if orig_msg[5] == '2' and weesrpctx.waiting_room is not None:
-                                    # We've got a waiting room and auth success.
+                                    # We've got a waiting room and auth success. Invite to encrypted room and setup set op hook when they join
+                                    global ircsrp_temp_hooks
                                     w.command(buffer, '/invite %s' % sender_nick)
+                                    fully_qualified_channel = w.buffer_get_string(buffer, 'name')
+                                    key = "%s@%s" % (sender_nick, fully_qualified_channel)
+                                    ircsrp_temp_hooks[key] = w.hook_signal("*,irc_in2_join", "ircsrp_op_authed_cb", key)
+
                                 # Break out of for loop, no sense in checking other contexts.
                                 break
             elif msg[5] in ('1','3'):
@@ -1243,6 +1249,22 @@ def ircsrp_reread_roster_cb(buffer, remaining_calls):
     """
     # Reread the roster (new timer gets added if needed)
     return ircsrp_dave_reread_roster(buffer)
+
+def ircsrp_op_authed_cb(data, signal, signal_data):
+    global ircsrp_temp_hooks
+    nick = w.info_get("irc_nick_from_host", signal_data)
+    server = signal.split(",")[0]
+    channel = signal_data.split(":")[-1]
+    # nick@server.#channel => n@s.#c
+    (n, sc) = data.split('@')
+    (s, c) = sc.split('.')
+    if nick == n and server == s and channel == c:
+        buffer = w.info_get("irc_buffer", "%s,%s" % (server, channel))
+        if buffer:
+            w.command(buffer, '/quote MODE %s +o %s' % (channel, nick))
+    if data in ircsrp_temp_hooks:
+        del ircsrp_temp_hooks[data]
+    return w.WEECHAT_RC_OK
 
 #####
 # Objects and functions not used when in Weechat script mode.
