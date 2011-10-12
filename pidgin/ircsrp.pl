@@ -56,7 +56,7 @@ sub plugin_load {
     # dave communication
     Purple::Cmd::register($plugin, 'ircsrp', 'ws', 1,
         Purple::Cmd::Flag::CHAT | Purple::Cmd::Flag::PRPL_ONLY | Purple::Cmd::Flag::ALLOW_WRONG_ARGS,
-        'prpl-irc', \&ircsrp_state_control, 'ircsrp <enable|disable|reset> [dave-nick] [user] [password]');
+        'prpl-irc', \&ircsrp_state_control, 'ircsrp <enable|disable|reset> <encrypted-room-name> <dave-nick> <user> <password>');
 
     debug('loaded');
 
@@ -155,6 +155,7 @@ sub ircsrp_state_control {
         debug('enabling ircsrp');
 
         my @args      = split(/\s+/, $args);
+        my $encrypted_room_name = shift(@args);
         my $dave_nick = shift(@args);
         my $I         = shift(@args);
         my $P         = shift(@args);
@@ -177,9 +178,9 @@ sub ircsrp_state_control {
 
         $context{'dave_conversation'} = start_dave_key_exchange(\%context, $conversation->get_account(), $dave_nick);
 
-        set_context($conversation->get_account(), $conversation->get_name(), \%context);
+        set_context($conversation->get_account(), $encrypted_room_name, \%context);
 
-        add_signal('receiving-im-msg', \&receiving_im_msg_cb, $conversation->get_name());
+        add_signal('receiving-im-msg', \&receiving_im_msg_cb, $encrypted_room_name);
         add_signal('sending-chat-msg', \&sending_chat_msg_cb);
         add_signal('receiving-chat-msg', \&receiving_chat_msg_cb);
 
