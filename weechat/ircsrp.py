@@ -1039,6 +1039,21 @@ def ircsrp_in_msg_cb(data, modifier, modifier_data, strng):
                                 sender_nick) != '')):
                             # Sender resides on encrypted channel or waiting room.  We can
                             # response to this message.
+                            
+                            # Before we respond, though, if we're in waiting
+                            # room mode, we'll check to see if the client is
+                            # already in the encrypted room.  If he is, we'll
+                            # kick him.  We do this becase the irc invite is
+                            # how we communicate the encrypted channel name to
+                            # the client - if he's already in the room, we
+                            # can't send him that invite.  We also can't assume
+                            # that his IRCSRP client is smart enough to figure
+                            # out the encrypted room without the invite.
+                            if (weesrpctx.waiting_room is not None and
+                                    w.nicklist_search_nick(buffer, '', sender_nick) != ''):
+                                # We're in waiting room mode and a client is reauthing - kick!
+                                w.command(buffer, '/kick %s' % sender_nick)
+
                             try:
                                 # Generate and send response to this keyexchange message.
                                 response = ircsrp_exchange(ctx, msg, sender_nick)
