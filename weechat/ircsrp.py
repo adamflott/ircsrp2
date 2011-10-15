@@ -1126,15 +1126,27 @@ def ircsrp_in_invite_cb(data, modifier, modifier_data, strng):
                 # callback will set ctx.encrypted_room with actual buffer ref
                 # when the join finishes. (assuming we're not already in it)
                 ctx.encrypted_room_buffer_name = '.'.join((server, msg))
-                # Test if we're already in the channel.  If not, join.  If so,
+
+                # There used to be a check here to make sure that we weren't
+                # already on the channel, but it was removed because (a)
+                # servers generally won't accept an invite to a user already on
+                # the channel in question and (b) Weechat has no way (that I
+                # could figure out) of determining whether or not we're on a
+                # channel - sure we can tell if there's a buffer for a channel,
+                # but no way to tell if it's a stale parted buffer or not, so
+                # the check here didn't work anyways.
                 enc_chan_buffer = w.buffer_search('irc', '%s.%s' % (server, msg))
-                if enc_chan_buffer == '':
-                    # We're not on the channel
-                    w.command(buffer, '/join ' + msg) # join the channel
-                else:
-                    # We're already on the channel
-                    # set ctx.encrypted_room
-                    ctx.encrypted_room = enc_chan_buffer
+                if enc_chan_buffer != '':
+                    # There's a stale buffer here.  We need to destroy it
+                    # before joining, otherwise the irc_channel_opened callback
+                    # won't ever get called.  For some reason, the callback
+                    # doesn't work if there's a stale parted channel buffer
+                    # around.  Since I can't figure out a way to test for that
+                    # condition, killing the buffer is the only choice left.
+                    w.buffer_close(enc_chan_buffer)
+
+                w.command(buffer, '/join ' + msg) # join the channel
+
     return strng
 
 def ircsrp_irc_channel_opened_cb(data, signal, signal_data):
