@@ -467,10 +467,15 @@ weechat_dir = None                  # Will hold weechat's config dir
 settings = {
         # Interval (in ms) between rekeys (6 hours)
         'channel_default.dave.rekey_interval':str(6*60*60*1000),
+
         # Interval (in ms) between roster re-reads (0 = never)
-        'channel_default.dave.reread_roster_interval':'0'
+        'channel_default.dave.reread_roster_interval':'0',
+
         # Waiting room channel ('' for disabled)
-        #'channel_default.dave.waiting_room':''
+        #'channel_default.dave.waiting_room':'',
+
+        # Post auth mode set (default is +v ; '' for disabled)
+        'channel_default.dave.post_auth.user_default.mode':'+v'
 }
 
 class WeeSRPCTX(object):
@@ -960,15 +965,19 @@ def ircsrp_unhook_general():
         w.unhook(h)
     ircsrp_general_hooks = []
 
-def ircsrp_config_get_channel(buffer, option):
+def ircsrp_config_get_channel(buffer, option, fallback=True):
     """
     Returns a config setting for a buffer, falling back on the non-channel specific defaults.
+
+    buffer -- buffer to read channel name from
+    option -- config option
+    fallback -- if False, don't fall back on non-channel specific defaults.
     """
     # Get buffer name
     buffer_name = w.buffer_get_string(buffer, 'name')
     # Try to get channel specific config
     value = w.config_get_plugin('channel_%s.%s' % (buffer_name, option))
-    if value == "":
+    if value == '' and fallback:
         # Try default
         value = w.config_get_plugin('channel_default.%s' % option)
     # No need to check
@@ -1055,6 +1064,20 @@ def ircsrp_in_msg_cb(data, modifier, modifier_data, strng):
                                 # We're in waiting room mode and a client is reauthing - kick!
                                 w.command(buffer, '/kick %s' % sender_nick)
 
+                            # XXX: This is kind of ugly, but unless I refactor the original IRCSRP
+                            # code, it has to be done.  We're taking the user name value from the
+                            # SRP exchange object, but it has to be before the exchange has 
+                            # been completed because the original code deletes the exchange object
+                            # at that time.
+                            #
+                            # I'll probably refactor those underlying objects at some point. --TC
+                            #
+                            if msg[5] == '2':
+                                srp_user = weesrpctx.ctx.users.others[sender_nick].I
+                            else:
+                                # If we're on step 0, just leave srp_user undefined.
+                                srp_user = None
+
                             try:
                                 # Generate and send response to this keyexchange message.
                                 response = ircsrp_exchange(ctx, msg, sender_nick)
@@ -1071,14 +1094,23 @@ def ircsrp_in_msg_cb(data, modifier, modifier_data, strng):
                                             (sender_nick, response))
                                 else:
                                     w.command(buffer, '/quote NOTICE %s :%s' % (sender_nick, response))
-                                # Send invite (if necessary)
-                                if orig_msg[5] == '2' and weesrpctx.waiting_room is not None:
-                                    # We've got a waiting room and auth success. Invite to encrypted room and setup set op hook when they join
-                                    global ircsrp_temp_hooks
-                                    w.command(buffer, '/invite %s' % sender_nick)
-                                    fully_qualified_channel = w.buffer_get_string(buffer, 'name')
-                                    key = "%s@%s" % (sender_nick, fully_qualified_channel)
-                                    ircsrp_temp_hooks[key] = w.hook_signal("*,irc_in2_join", "ircsrp_op_authed_cb", key)
+                                # Post auth steps
+                                if orig_msg[5] == '2':
+                                    if weesrpctx.waiting_room is None:
+                                        # We're not in waiting room mode.  The user is authed and
+                                        # presumably in the room.  Run user post auth.
+                                        ircsrp_post_auth_mode_apply(buffer, sender_nick, srp_user)
+                                    else:
+                                        # We've got a waiting room and auth success. Invite to
+                                        # encrypted room and setup set up post auth hook for when
+                                        # they join.
+                                        global ircsrp_temp_hooks
+                                        w.command(buffer, '/invite %s' % sender_nick)
+                                        fully_qualified_channel = w.buffer_get_string(buffer, 'name')
+                                        key = "%s@%s@%s" % (srp_user, sender_nick,
+                                                                        fully_qualified_channel)
+                                        ircsrp_temp_hooks[key] = w.hook_signal("*,irc_in2_join",
+                                                                "ircsrp_post_auth_join_cb", key)
 
                                 # Break out of for loop, no sense in checking other contexts.
                                 break
@@ -1250,22 +1282,63 @@ def ircsrp_reread_roster_cb(buffer, remaining_calls):
     # Reread the roster (new timer gets added if needed)
     return ircsrp_dave_reread_roster(buffer)
 
-def ircsrp_op_authed_cb(data, signal, signal_data):
+def ircsrp_post_auth_join_cb(data, signal, signal_data):
+    # Callback for temporary on_join hook for waiting room post-auth
     global ircsrp_temp_hooks
     nick = w.info_get("irc_nick_from_host", signal_data)
     server = signal.split(",")[0]
     channel = signal_data.split(":")[-1]
-    # nick@server.#channel => n@s.#c
-    (n, sc) = data.split('@')
-    (s, c) = sc.split('.')
+    # srp_user@nick@server.#channel => n@s.#c
+    srp_user, n, sc = data.split('@')
+    s, c = sc.split('.')
+    # If channel matches, 
     if nick == n and server == s and channel == c:
         buffer = w.info_get("irc_buffer", "%s,%s" % (server, channel))
         if buffer:
-            w.command(buffer, '/quote MODE %s +o %s' % (channel, nick))
-    if data in ircsrp_temp_hooks:
-        del ircsrp_temp_hooks[data]
+            ircsrp_post_auth_mode_apply(buffer, nick, srp_user)
+
+        # Unhook and delete hook ref
+        if data in ircsrp_temp_hooks:
+            w.unhook(ircsrp_temp_hooks[data])
+            del ircsrp_temp_hooks[data]
     return w.WEECHAT_RC_OK
 
+def ircsrp_post_auth_mode_apply(buffer, nick, srp_user):
+    """
+    buffer -- buffer to apply mode changes to
+    nick -- irc nick of auth'd user
+    srp_user -- IRCSRP login user
+
+    This function looks up what post auth mode should be set based on SRP user
+    and sets that mode for the user on the current buffer.
+    """
+    # XXX: Case sensitivity for SRP user?
+    #
+    # XXX: Don't name any users "default" or they won't be able to get specific post auth
+    # config options set!  There needs to be a warning about this
+    #
+    # First, determine what mode to set.  To do so, we'll examine the following
+    # config options and choose the first one that exists:
+    #
+    # <channel>.dave.post_auth.<srp_user>.mode
+    # <channel>.dave.post_auth.user_default.mode
+    # channel_default.dave.post_auth.<srp_user>.mode
+    # channel_default.dave.post_auth.user_default.mode
+    #
+    
+    modes = ircsrp_config_get_channel(buffer, 'dave.post_auth.user_%s.mode' % srp_user,
+                fallback=False) or \
+            ircsrp_config_get_channel(buffer, 'dave.post_auth.user_default.mode',
+                fallback=False) or \
+            w.config_get_plugin('channel_default.dave.post_auth.user_%s.mode' % srp_user) or \
+            w.config_get_plugin('channel_default.dave.post_auth.user_default.mode')
+    
+    # We've got the modes from the config, now we just have to apply the mode (or not
+    # if it's blank).
+    if modes.strip():
+        w.command(buffer, '/mode %s %s' % (modes, nick))
+
+        
 #####
 # Objects and functions not used when in Weechat script mode.
 #####

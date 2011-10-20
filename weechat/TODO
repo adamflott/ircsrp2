@@ -5,3 +5,5 @@ Known Issues:
 * Roster pickle load fails if script is in autoload directory.
 * Truncated topics and messages fail to decrypt.
 * Nick collisions on multiple irc networks might cause issues.
+* Are SRP user names case sensitive?  SRP user config opts are not.
+* SRP config options do not allow for a user named "default"
