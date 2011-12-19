@@ -1,9 +1,21 @@
-Known Issues:
+Immediately fixable known issues:
 * Key change messages are accepted from anybody. [security]
+* Truncated topics and messages fail to decrypt.
+    * Could be fixed by splitting too-long messages into shorter ones.  IRC
+        RFC specifies max command message length.  Too-long messages could be
+        split up automatically.
+* The code needs a refactor.  I started with the goal of keeping the original
+    reference implementation separate and unmodified.  That didn't end up
+    working out and the code could be greatly simplified with a small amount
+    of refactoring.
+* A status bar widget to show encryption status of a channel would be great.
+* SRP config options do not allow for a user named "default"
+
+Other known issues:
 * IRC server could spoof appearance of encrypted message.
+    * I need unspoofable markup to indicate encrypted message via the UI
 * Hard wired to IRC only.
 * Roster pickle load fails if script is in autoload directory.
-* Truncated topics and messages fail to decrypt.
 * Nick collisions on multiple irc networks might cause issues.
 * Are SRP user names case sensitive?  SRP user config opts are not.
-* SRP config options do not allow for a user named "default"
+
