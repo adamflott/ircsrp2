@@ -944,11 +944,11 @@ def ircsrp_hook_general():
     global ircsrp_general_hooks
 
     # Modifier hooks
-    ircsrp_general_hooks.append(w.hook_modifier('irc_in_privmsg', 'ircsrp_in_msg_cb', ''))
-    ircsrp_general_hooks.append(w.hook_modifier('irc_in_notice', 'ircsrp_in_msg_cb', ''))
-    ircsrp_general_hooks.append(w.hook_modifier('irc_in_332', 'ircsrp_in_msg_cb', ''))
-    ircsrp_general_hooks.append(w.hook_modifier('irc_in_topic', 'ircsrp_in_msg_cb', ''))
-    ircsrp_general_hooks.append(w.hook_modifier('irc_in_invite', 'ircsrp_in_invite_cb', ''))
+    ircsrp_general_hooks.append(w.hook_modifier('irc_in2_privmsg', 'ircsrp_in_msg_cb', ''))
+    ircsrp_general_hooks.append(w.hook_modifier('irc_in2_notice', 'ircsrp_in_msg_cb', ''))
+    ircsrp_general_hooks.append(w.hook_modifier('irc_in2_332', 'ircsrp_in_msg_cb', ''))
+    ircsrp_general_hooks.append(w.hook_modifier('irc_in2_topic', 'ircsrp_in_msg_cb', ''))
+    ircsrp_general_hooks.append(w.hook_modifier('irc_in2_invite', 'ircsrp_in_invite_cb', ''))
     ircsrp_general_hooks.append(w.hook_modifier('irc_out_privmsg', 'ircsrp_out_msg_cb', ''))
     ircsrp_general_hooks.append(w.hook_modifier('irc_out_topic', 'ircsrp_out_msg_cb', ''))
 
